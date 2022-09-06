@@ -14,6 +14,9 @@ import (
 	"github.com/kvtools/valkeyrie/store"
 )
 
+// StoreName the name of the store.
+const StoreName = "consul"
+
 const (
 	// DefaultWatchWaitTime is how long we block for at a time to check if the watched key has changed.
 	// This affects the minimum time it takes to cancel a watch.
@@ -39,143 +42,53 @@ var (
 	ErrSessionRenew = errors.New("cannot set or renew session for ttl, unable to operate on sessions")
 )
 
-// Register registers consul to valkeyrie.
-func Register() {
-	valkeyrie.AddStore(store.CONSUL, New)
+// registers Consul to Valkeyrie.
+func init() {
+	valkeyrie.Register(StoreName, newStore)
 }
 
-// Consul is the receiver type for the Store interface.
-type Consul struct {
-	config *api.Config
+// Config the Consul configuration.
+type Config struct {
+	TLS               *tls.Config
+	ConnectionTimeout time.Duration
+	Token             string
+	Namespace         string
+}
+
+func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
+	cfg, ok := options.(*Config)
+	if !ok && cfg != nil {
+		return nil, &store.InvalidConfigurationError{Store: StoreName, Config: options}
+	}
+
+	return New(ctx, endpoints, cfg)
+}
+
+// Store implements the store.Store interface.
+type Store struct {
 	client *api.Client
 }
 
-// New creates a new Consul client given a list of endpoints and optional tls config.
-func New(_ context.Context, endpoints []string, options *store.Config) (store.Store, error) {
+// New creates a new Consul client.
+func New(_ context.Context, endpoints []string, options *Config) (*Store, error) {
 	if len(endpoints) > 1 {
 		return nil, ErrMultipleEndpointsUnsupported
 	}
 
-	// Create Consul client.
-	config := api.DefaultConfig()
-	config.HttpClient = http.DefaultClient
-	config.Address = endpoints[0]
-
-	s := &Consul{
-		config: config,
-	}
-
-	// Set options.
-	if options != nil {
-		if options.TLS != nil {
-			s.setTLS(options.TLS)
-		}
-
-		if options.ConnectionTimeout != 0 {
-			s.setTimeout(options.ConnectionTimeout)
-		}
-
-		if options.Token != "" {
-			s.setToken(options.Token)
-		}
-
-		if options.Namespace != "" {
-			s.setNamespace(options.Namespace)
-		}
-	}
+	config := createConfig(endpoints, options)
 
 	// Creates a new client.
 	client, err := api.NewClient(config)
 	if err != nil {
 		return nil, err
 	}
-	s.client = client
 
-	return s, nil
-}
-
-// setTLS sets Consul TLS options.
-func (s *Consul) setTLS(tlsCfg *tls.Config) {
-	s.config.HttpClient.Transport = &http.Transport{
-		TLSClientConfig: tlsCfg,
-	}
-	s.config.Scheme = "https"
-}
-
-// setTimeout sets the timeout for connecting to Consul.
-func (s *Consul) setTimeout(timeout time.Duration) {
-	s.config.WaitTime = timeout
-}
-
-// setToken sets the token for connecting to Consul.
-func (s *Consul) setToken(token string) {
-	s.config.Token = token
-}
-
-// setNamespace sets the namespace for connecting to Consul.
-func (s *Consul) setNamespace(namespace string) {
-	s.config.Namespace = namespace
-}
-
-// normalize the key for usage in Consul.
-func (s *Consul) normalize(key string) string {
-	return strings.TrimPrefix(store.Normalize(key), "/")
-}
-
-func (s *Consul) renewSession(pair *api.KVPair, ttl time.Duration) error {
-	// Check if there is any previous session with an active TTL.
-	session, err := s.getActiveSession(pair.Key)
-	if err != nil {
-		return err
-	}
-
-	if session == "" {
-		entry := &api.SessionEntry{
-			Behavior:  api.SessionBehaviorDelete, // Delete the key when the session expires.
-			TTL:       (ttl / 2).String(),        // Consul multiplies the TTL by 2x.
-			LockDelay: 1 * time.Millisecond,      // Virtually disable lock delay.
-		}
-
-		// Create the key session.
-		session, _, err = s.client.Session().Create(entry, nil)
-		if err != nil {
-			return err
-		}
-
-		lockOpts := &api.LockOptions{
-			Key:     pair.Key,
-			Session: session,
-		}
-
-		// Lock and ignore if lock is held.
-		// It's just a placeholder for the ephemeral behavior.
-		lock, _ := s.client.LockOpts(lockOpts)
-		if lock != nil {
-			_, _ = lock.Lock(nil)
-		}
-	}
-
-	_, _, err = s.client.Session().Renew(session, nil)
-	return err
-}
-
-// getActiveSession checks if the key already has a session attached.
-func (s *Consul) getActiveSession(key string) (string, error) {
-	pair, _, err := s.client.KV().Get(key, nil)
-	if err != nil {
-		return "", err
-	}
-
-	if pair == nil || pair.Session == "" {
-		return "", nil
-	}
-
-	return pair.Session, nil
+	return &Store{client: client}, nil
 }
 
 // Get the value at "key".
 // Returns the last modified index to use in conjunction to CAS calls.
-func (s *Consul) Get(_ context.Context, key string, opts *store.ReadOptions) (*store.KVPair, error) {
+func (s *Store) Get(_ context.Context, key string, opts *store.ReadOptions) (*store.KVPair, error) {
 	options := &api.QueryOptions{
 		AllowStale:        false,
 		RequireConsistent: true,
@@ -186,7 +99,7 @@ func (s *Consul) Get(_ context.Context, key string, opts *store.ReadOptions) (*s
 		options.RequireConsistent = opts.Consistent
 	}
 
-	pair, meta, err := s.client.KV().Get(s.normalize(key), options)
+	pair, meta, err := s.client.KV().Get(normalize(key), options)
 	if err != nil {
 		return nil, err
 	}
@@ -200,9 +113,9 @@ func (s *Consul) Get(_ context.Context, key string, opts *store.ReadOptions) (*s
 }
 
 // Put a value at "key".
-func (s *Consul) Put(_ context.Context, key string, value []byte, opts *store.WriteOptions) error {
+func (s *Store) Put(_ context.Context, key string, value []byte, opts *store.WriteOptions) error {
 	p := &api.KVPair{
-		Key:   s.normalize(key),
+		Key:   normalize(key),
 		Value: value,
 		Flags: api.LockFlagValue,
 	}
@@ -226,17 +139,17 @@ func (s *Consul) Put(_ context.Context, key string, value []byte, opts *store.Wr
 }
 
 // Delete a value at "key".
-func (s *Consul) Delete(ctx context.Context, key string) error {
+func (s *Store) Delete(ctx context.Context, key string) error {
 	if _, err := s.Get(ctx, key, nil); err != nil {
 		return err
 	}
 
-	_, err := s.client.KV().Delete(s.normalize(key), nil)
+	_, err := s.client.KV().Delete(normalize(key), nil)
 	return err
 }
 
 // Exists checks that the key exists inside the store.
-func (s *Consul) Exists(ctx context.Context, key string, opts *store.ReadOptions) (bool, error) {
+func (s *Store) Exists(ctx context.Context, key string, opts *store.ReadOptions) (bool, error) {
 	_, err := s.Get(ctx, key, opts)
 	if err != nil {
 		if errors.Is(err, store.ErrKeyNotFound) {
@@ -248,7 +161,7 @@ func (s *Consul) Exists(ctx context.Context, key string, opts *store.ReadOptions
 }
 
 // List child nodes of a given directory.
-func (s *Consul) List(_ context.Context, directory string, opts *store.ReadOptions) ([]*store.KVPair, error) {
+func (s *Store) List(_ context.Context, directory string, opts *store.ReadOptions) ([]*store.KVPair, error) {
 	options := &api.QueryOptions{
 		AllowStale:        false,
 		RequireConsistent: true,
@@ -259,7 +172,7 @@ func (s *Consul) List(_ context.Context, directory string, opts *store.ReadOptio
 		options.RequireConsistent = false
 	}
 
-	pairs, _, err := s.client.KV().List(s.normalize(directory), options)
+	pairs, _, err := s.client.KV().List(normalize(directory), options)
 	if err != nil {
 		return nil, err
 	}
@@ -284,12 +197,12 @@ func (s *Consul) List(_ context.Context, directory string, opts *store.ReadOptio
 }
 
 // DeleteTree deletes a range of keys under a given directory.
-func (s *Consul) DeleteTree(ctx context.Context, directory string) error {
+func (s *Store) DeleteTree(ctx context.Context, directory string) error {
 	if _, err := s.List(ctx, directory, nil); err != nil {
 		return err
 	}
 
-	_, err := s.client.KV().DeleteTree(s.normalize(directory), nil)
+	_, err := s.client.KV().DeleteTree(normalize(directory), nil)
 	return err
 }
 
@@ -297,7 +210,7 @@ func (s *Consul) DeleteTree(ctx context.Context, directory string) error {
 // It returns a channel that will receive changes or pass on errors.
 // Upon creation, the current value will first be sent to the channel.
 // Providing a non-nil stopCh can be used to stop watching.
-func (s *Consul) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-chan *store.KVPair, error) {
+func (s *Store) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-chan *store.KVPair, error) {
 	kv := s.client.KV()
 	watchCh := make(chan *store.KVPair)
 
@@ -346,7 +259,7 @@ func (s *Consul) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<
 // It returns a channel that will receive changes or pass on errors.
 // Upon creating a watch, the current children values will be sent to the channel.
 // Providing a non-nil stopCh can be used to stop watching.
-func (s *Consul) WatchTree(ctx context.Context, directory string, _ *store.ReadOptions) (<-chan []*store.KVPair, error) {
+func (s *Store) WatchTree(ctx context.Context, directory string, _ *store.ReadOptions) (<-chan []*store.KVPair, error) {
 	kv := s.client.KV()
 	watchCh := make(chan []*store.KVPair)
 
@@ -396,11 +309,11 @@ func (s *Consul) WatchTree(ctx context.Context, directory string, _ *store.ReadO
 }
 
 // NewLock returns a handle to a lock struct which can be used to provide mutual exclusion on a key.
-func (s *Consul) NewLock(ctx context.Context, key string, opts *store.LockOptions) (store.Locker, error) {
+func (s *Store) NewLock(ctx context.Context, key string, opts *store.LockOptions) (store.Locker, error) {
 	ttl := defaultLockTTL
 
 	lockOpts := &api.LockOptions{
-		Key: s.normalize(key),
+		Key: normalize(key),
 	}
 
 	if opts != nil {
@@ -458,7 +371,7 @@ func (s *Consul) NewLock(ctx context.Context, key string, opts *store.LockOption
 // it keeps trying to delete the session periodically until it can contact the store,
 // this ensures that the lock is not maintained indefinitely which ensures liveness
 // over safety for the lock when the store becomes unavailable.
-func (s *Consul) renewLockSession(initialTTL string, id string, stopRenew chan struct{}, q *api.WriteOptions) {
+func (s *Store) renewLockSession(initialTTL string, id string, stopRenew chan struct{}, q *api.WriteOptions) {
 	ttl, err := time.ParseDuration(initialTTL)
 	if err != nil {
 		return
@@ -507,8 +420,8 @@ func (s *Consul) renewLockSession(initialTTL string, id string, stopRenew chan s
 
 // AtomicPut puts a value at "key" if the key has not been modified in the meantime,
 // throws an error if this is the case.
-func (s *Consul) AtomicPut(ctx context.Context, key string, value []byte, previous *store.KVPair, _ *store.WriteOptions) (bool, *store.KVPair, error) {
-	p := &api.KVPair{Key: s.normalize(key), Value: value, Flags: api.LockFlagValue}
+func (s *Store) AtomicPut(ctx context.Context, key string, value []byte, previous *store.KVPair, _ *store.WriteOptions) (bool, *store.KVPair, error) {
+	p := &api.KVPair{Key: normalize(key), Value: value, Flags: api.LockFlagValue}
 
 	// Consul interprets ModifyIndex = 0 as new key.
 	p.ModifyIndex = 0
@@ -538,12 +451,12 @@ func (s *Consul) AtomicPut(ctx context.Context, key string, value []byte, previo
 
 // AtomicDelete deletes a value at "key" if the key has not been modified in the meantime,
 // throws an error if this is the case.
-func (s *Consul) AtomicDelete(ctx context.Context, key string, previous *store.KVPair) (bool, error) {
+func (s *Store) AtomicDelete(ctx context.Context, key string, previous *store.KVPair) (bool, error) {
 	if previous == nil {
 		return false, store.ErrPreviousNotSpecified
 	}
 
-	p := &api.KVPair{Key: s.normalize(key), ModifyIndex: previous.LastIndex, Flags: api.LockFlagValue}
+	p := &api.KVPair{Key: normalize(key), ModifyIndex: previous.LastIndex, Flags: api.LockFlagValue}
 
 	// Extra Get operation to check on the key.
 	_, err := s.Get(ctx, key, nil)
@@ -561,7 +474,92 @@ func (s *Consul) AtomicDelete(ctx context.Context, key string, previous *store.K
 }
 
 // Close closes the client connection.
-func (s *Consul) Close() error { return nil }
+func (s *Store) Close() error { return nil }
+
+func (s *Store) renewSession(pair *api.KVPair, ttl time.Duration) error {
+	// Check if there is any previous session with an active TTL.
+	session, err := s.getActiveSession(pair.Key)
+	if err != nil {
+		return err
+	}
+
+	if session == "" {
+		entry := &api.SessionEntry{
+			Behavior:  api.SessionBehaviorDelete, // Delete the key when the session expires.
+			TTL:       (ttl / 2).String(),        // Consul multiplies the TTL by 2x.
+			LockDelay: 1 * time.Millisecond,      // Virtually disable lock delay.
+		}
+
+		// Create the key session.
+		session, _, err = s.client.Session().Create(entry, nil)
+		if err != nil {
+			return err
+		}
+
+		lockOpts := &api.LockOptions{
+			Key:     pair.Key,
+			Session: session,
+		}
+
+		// Lock and ignore if lock is held.
+		// It's just a placeholder for the ephemeral behavior.
+		lock, _ := s.client.LockOpts(lockOpts)
+		if lock != nil {
+			_, _ = lock.Lock(nil)
+		}
+	}
+
+	_, _, err = s.client.Session().Renew(session, nil)
+	return err
+}
+
+// getActiveSession checks if the key already has a session attached.
+func (s *Store) getActiveSession(key string) (string, error) {
+	pair, _, err := s.client.KV().Get(key, nil)
+	if err != nil {
+		return "", err
+	}
+
+	if pair == nil || pair.Session == "" {
+		return "", nil
+	}
+
+	return pair.Session, nil
+}
+
+func createConfig(endpoints []string, options *Config) *api.Config {
+	config := api.DefaultConfig()
+	config.HttpClient = http.DefaultClient
+	config.Address = endpoints[0]
+
+	if options != nil {
+		if options.TLS != nil {
+			config.HttpClient.Transport = &http.Transport{
+				TLSClientConfig: options.TLS,
+			}
+			config.Scheme = "https"
+		}
+
+		if options.ConnectionTimeout != 0 {
+			config.WaitTime = options.ConnectionTimeout
+		}
+
+		if options.Token != "" {
+			config.Token = options.Token
+		}
+
+		if options.Namespace != "" {
+			config.Namespace = options.Namespace
+		}
+	}
+
+	return config
+}
+
+// normalize the key for usage in Consul.
+func normalize(key string) string {
+	return strings.TrimPrefix(key, "/")
+}
 
 type consulLock struct {
 	lock    *api.Lock

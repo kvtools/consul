@@ -7,7 +7,7 @@ import (
 
 	"github.com/kvtools/valkeyrie"
 	"github.com/kvtools/valkeyrie/store"
-	"github.com/kvtools/valkeyrie/testutils"
+	"github.com/kvtools/valkeyrie/testsuite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +22,7 @@ func makeConsulClient(t *testing.T) store.Store {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	config := &store.Config{
+	config := &Config{
 		ConnectionTimeout: 3 * time.Second,
 	}
 
@@ -33,16 +33,14 @@ func makeConsulClient(t *testing.T) store.Store {
 }
 
 func TestRegister(t *testing.T) {
-	Register()
-
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	kv, err := valkeyrie.NewStore(ctx, store.CONSUL, []string{client}, nil)
+	kv, err := valkeyrie.NewStore(ctx, StoreName, []string{client}, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, kv)
 
-	assert.IsTypef(t, kv, new(Consul), "Error registering and initializing consul")
+	assert.IsTypef(t, kv, new(Store), "Error registering and initializing consul")
 }
 
 func TestConsulStore(t *testing.T) {
@@ -51,24 +49,24 @@ func TestConsulStore(t *testing.T) {
 	ttlKV := makeConsulClient(t)
 
 	t.Cleanup(func() {
-		testutils.RunCleanup(t, kv)
+		testsuite.RunCleanup(t, kv)
 	})
 
-	testutils.RunCleanup(t, kv)
-	testutils.RunTestCommon(t, kv)
-	testutils.RunTestAtomic(t, kv)
-	testutils.RunTestWatch(t, kv)
-	testutils.RunTestLock(t, kv)
-	testutils.RunTestLockTTL(t, kv, lockKV)
-	testutils.RunTestTTL(t, kv, ttlKV)
+	testsuite.RunCleanup(t, kv)
+	testsuite.RunTestCommon(t, kv)
+	testsuite.RunTestAtomic(t, kv)
+	testsuite.RunTestWatch(t, kv)
+	testsuite.RunTestLock(t, kv)
+	testsuite.RunTestLockTTL(t, kv, lockKV)
+	testsuite.RunTestTTL(t, kv, ttlKV)
 }
 
 func TestGetActiveSession(t *testing.T) {
 	kv := makeConsulClient(t)
 
-	assert.IsTypef(t, kv, new(Consul), "Error registering and initializing consul")
+	assert.IsTypef(t, kv, new(Store), "Error registering and initializing consul")
 
-	consul, ok := kv.(*Consul)
+	consul, ok := kv.(*Store)
 	require.True(t, ok)
 
 	key := "foo"
