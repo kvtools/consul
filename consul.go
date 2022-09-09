@@ -180,7 +180,7 @@ func (s *Store) List(_ context.Context, directory string, opts *store.ReadOption
 		return nil, store.ErrKeyNotFound
 	}
 
-	kv := []*store.KVPair{}
+	var kv []*store.KVPair
 
 	for _, pair := range pairs {
 		if pair.Key == directory {
@@ -290,18 +290,18 @@ func (s *Store) WatchTree(ctx context.Context, directory string, _ *store.ReadOp
 			opts.WaitIndex = meta.LastIndex
 
 			// Return children KV pairs to the channel.
-			kvpairs := []*store.KVPair{}
+			var kvPairs []*store.KVPair
 			for _, pair := range pairs {
 				if pair.Key == directory {
 					continue
 				}
-				kvpairs = append(kvpairs, &store.KVPair{
+				kvPairs = append(kvPairs, &store.KVPair{
 					Key:       pair.Key,
 					Value:     pair.Value,
 					LastIndex: pair.ModifyIndex,
 				})
 			}
-			watchCh <- kvpairs
+			watchCh <- kvPairs
 		}
 	}()
 
