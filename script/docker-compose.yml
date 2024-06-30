@@ -1,8 +1,5 @@
-version: "3.9"
-
 # when running test local, you can specify the image version using the env var CONSUL_VERSION.
 # Example: CONSUL_VERSION=1.1.0 make
-
 
 services:
   consul:
